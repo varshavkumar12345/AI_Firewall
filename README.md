@@ -12,10 +12,10 @@ A complete reinforcement-learning-based firewall simulation system.
 
 ## 🔧 Backend Setup
 
-cd backend
-pip install -r requirements.txt
-python3 train.py
-python3 server.py
+- cd backend
+- pip install -r requirements.txt
+- python3 train.py
+- python3 server.py
 
 
 ---
@@ -43,4 +43,5 @@ npm start
    **http://localhost:3000**
 
 ---
+
 
