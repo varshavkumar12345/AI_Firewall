@@ -23,7 +23,9 @@ python3 server.py
 ## 🖥 Frontend Setup
 
 cd frontend
+
 npm install
+
 npm start
 
 
@@ -41,3 +43,4 @@ npm start
    **http://localhost:3000**
 
 ---
+
