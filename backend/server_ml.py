@@ -7,8 +7,8 @@
 # Local uploaded model reference (for documentation):
 # file:///mnt/data/trained_firewall_model.pkl
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from flask import Flask, request, jsonify, make_response
+from flask_cors import CORS
 from typing import List, Optional
 import numpy as np
 import joblib
@@ -24,24 +24,13 @@ LSTM_PATH = os.path.join(MODEL_DIR, "lstm.pt")
 XGB_PATH = os.path.join(MODEL_DIR, "xgb.joblib")
 DEVICE = torch.device("cpu")
 
-# ---- FASTAPI ----
-app = FastAPI(title="Firewall ML API")
-
+# ---- FLASK ----
+app = Flask(__name__)
 # CORS so frontend can talk to it
-from fastapi.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+CORS(app, resources={r"/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173", "*"]}})
 
 # ---- Pydantic request models ----
-class PacketSeq(BaseModel):
-    history: List[List[float]]  # list of [pps, unique_ips, syn_ratio] for last N timestamps
-    current: List[float]        # [pps, unique_ips, syn_ratio]
-    ip: Optional[str] = None
+# Request payloads are parsed from JSON in Flask handlers (no pydantic validation here)
 
 # ---- LSTM model class (must match training) ----
 class SuspiciousLSTM(nn.Module):
@@ -154,31 +143,39 @@ def xgb_decision(feature_vec: np.ndarray) -> int:
     return 0
 
 # ---- Endpoints ----
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
-    return {"status":"ok", "models": {"scaler": os.path.exists(SCALER_PATH), "lstm": os.path.exists(LSTM_PATH), "xgb": os.path.exists(XGB_PATH)}}
+    return jsonify({"status":"ok", "models": {"scaler": os.path.exists(SCALER_PATH), "lstm": os.path.exists(LSTM_PATH), "xgb": os.path.exists(XGB_PATH)}})
 
-@app.get("/debug_info")
+@app.route("/debug_info", methods=["GET"])
 def debug_info():
-    return {
+    return jsonify({
         "scaler_exists": os.path.exists(SCALER_PATH),
         "lstm_exists": os.path.exists(LSTM_PATH),
         "xgb_exists": os.path.exists(XGB_PATH),
         "scaler_n_features": getattr(scaler, "n_features_in_", None)
-    }
+    })
 
-@app.post("/predict_seq")
-def predict_seq(body: PacketSeq):
+@app.route("/predict_seq", methods=["POST"])
+def predict_seq():
     try:
+        body = request.get_json(force=True)
+        if body is None:
+            return make_response(jsonify({"detail": "Invalid JSON payload"}), 400)
+
+        history = body.get("history")
+        current = body.get("current")
+        ip = body.get("ip")
+
         # validate lengths
-        if len(body.current) != 3:
-            raise HTTPException(status_code=400, detail="current must be length 3: [pps, unique_ips, syn_ratio]")
-        if len(body.history) < 2:
-            raise HTTPException(status_code=400, detail="history must be at least length 2 (seq of [pps,unique_ips,syn_ratio])")
+        if not isinstance(current, (list, tuple)) or len(current) != 3:
+            return make_response(jsonify({"detail": "current must be length 3: [pps, unique_ips, syn_ratio]"}), 400)
+        if not isinstance(history, (list, tuple)) or len(history) < 2:
+            return make_response(jsonify({"detail": "history must be at least length 2 (seq of [pps,unique_ips,syn_ratio])"}), 400)
 
         # raw arrays
-        hist = np.array(body.history, dtype=np.float32)  # (seq_len, 3)
-        cur = np.array(body.current, dtype=np.float32).reshape(1, -1)  # (1,3)
+        hist = np.array(history, dtype=np.float32)  # (seq_len, 3)
+        cur = np.array(current, dtype=np.float32).reshape(1, -1)  # (1,3)
 
         # ---- SCALE / PREPARE FEATURES SAFELY ----
         # Compute suspicious using the (raw) history (our LSTM was trained on raw sequences)
@@ -218,20 +215,22 @@ def predict_seq(body: PacketSeq):
         # compute decision
         action = xgb_decision(feat)  # 0/1/2
 
-        return {"action": int(action), "suspicious": float(susp_score), "ip": body.ip}
-    except HTTPException:
-        # re-raise http exceptions
-        raise
+        return jsonify({"action": int(action), "suspicious": float(susp_score), "ip": ip})
     except Exception as e:
         # For development: return error detail instead of generic 500 (helps debugging)
         # NOTE: remove or change for production
-        return {"error": str(e), "type": type(e).__name__}
+        return make_response(jsonify({"error": str(e), "type": type(e).__name__}), 500)
 
 # ---- reload endpoint to reload models without restarting server (helpful) ----
-@app.post("/reload_models")
+@app.route("/reload_models", methods=["POST"])
 def reload_models():
     try:
         try_load()
-        return {"reloaded": True}
+        return jsonify({"reloaded": True})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return make_response(jsonify({"detail": str(e)}), 500)
+
+
+if __name__ == "__main__":
+    # default Flask dev server for local testing
+    app.run(host="0.0.0.0", port=8000, debug=True)
