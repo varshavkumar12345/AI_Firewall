@@ -19,6 +19,9 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
+// local file (uploaded) — convert to URL for image usage if needed
+const UPLOADED_IMAGE = "file:///mnt/data/012f61c3-55a1-4f20-8331-32654895e802.png";
+
 const actionLabel = (a) => {
   if (a === 2) return { text: "BLOCK", color: "#ef4444" };
   if (a === 1) return { text: "RATE-LIMIT", color: "#f59e0b" };
@@ -72,13 +75,17 @@ export default function FirewallDemo() {
 
   // Seed initial plausible values
   useEffect(() => {
-    setPps( sampleNormal(120, 30) );
-    setUniqueIps( Math.max(1, sampleNormal(6, 2)) );
-    setSynRatio( Number((0.06 + Math.random() * 0.05).toFixed(3)) );
+    setPps(sampleNormal(120, 30));
+    setUniqueIps(Math.max(1, sampleNormal(6, 2)));
+    setSynRatio(Number((0.06 + Math.random() * 0.05).toFixed(3)));
     // populate historySeq with plausible values
     const init = [];
     for (let i = 0; i < SEQ_LEN; i++) {
-      init.push([ sampleNormal(120, 30), Math.max(1, sampleNormal(6,2)), Number((0.06 + Math.random()*0.05).toFixed(3)) ]);
+      init.push([
+        sampleNormal(120, 30),
+        Math.max(1, sampleNormal(6, 2)),
+        Number((0.06 + Math.random() * 0.05).toFixed(3)),
+      ]);
     }
     setHistorySeq(init);
   }, []);
@@ -106,36 +113,37 @@ export default function FirewallDemo() {
     // baseline drift
     let basePps = sampleNormal(120, 25);
     let baseUnique = Math.max(1, sampleNormal(6, 2));
-    let baseSyn = Math.min(0.9, Math.max(0.01, Number((0.05 + Math.random()*0.06).toFixed(3))));
+    let baseSyn = Math.min(
+      0.9,
+      Math.max(0.01, Number((0.05 + Math.random() * 0.06).toFixed(3)))
+    );
 
     // adjust depending on wave mode
     if (wr.mode === "ramp") {
-      // ramp up over rampTicks
       const frac = Math.min(1, wr.tick / Math.max(1, wr.rampTicks));
-      const mult = 1 + frac * (1.0 + wr.intensity*2); // grows
-      basePps = Math.round(basePps * mult + (wr.intensity * 400));
-      baseSyn = Math.min(1, baseSyn + frac * (0.3 + wr.intensity*0.5));
+      const mult = 1 + frac * (1.0 + wr.intensity * 2); // grows
+      basePps = Math.round(basePps * mult + wr.intensity * 400);
+      baseSyn = Math.min(1, baseSyn + frac * (0.3 + wr.intensity * 0.5));
       baseUnique = Math.round(baseUnique * (1 + frac * 2.5));
       if (wr.tick >= wr.rampTicks) {
         wr.mode = "attack";
         wr.tick = 0;
       }
     } else if (wr.mode === "attack") {
-      // intense attack
       const mult = 2.5 + wr.intensity * 3.0;
-      basePps = Math.round(basePps * mult + (1000 * wr.intensity));
+      basePps = Math.round(basePps * mult + 1000 * wr.intensity);
       baseSyn = Math.min(1, baseSyn + 0.4 + wr.intensity * 0.5);
-      baseUnique = Math.round(baseUnique * (2 + wr.intensity*3));
+      baseUnique = Math.round(baseUnique * (2 + wr.intensity * 3));
       if (wr.tick >= wr.attackTicks) {
         wr.mode = "recover";
         wr.tick = 0;
       }
     } else if (wr.mode === "recover") {
       const frac = Math.min(1, wr.tick / Math.max(1, wr.recoverTicks));
-      const mult = 1 + (1 - frac) * (1.5 + wr.intensity*2);
+      const mult = 1 + (1 - frac) * (1.5 + wr.intensity * 2);
       basePps = Math.round(basePps * mult);
-      baseSyn = Math.min(1, baseSyn + (1-frac) * 0.25);
-      baseUnique = Math.round(baseUnique * (1 + (1-frac) * 2));
+      baseSyn = Math.min(1, baseSyn + (1 - frac) * 0.25);
+      baseUnique = Math.round(baseUnique * (1 + (1 - frac) * 2));
       if (wr.tick >= wr.recoverTicks) {
         wr.mode = "normal";
         wr.tick = 0;
@@ -148,11 +156,13 @@ export default function FirewallDemo() {
     }
 
     // small randomness to make values varied
-    basePps = Math.max(1, Math.round(basePps + (Math.random()*50 - 25)));
-    baseUnique = Math.max(1, Math.round(baseUnique + Math.random()*6 - 3));
-    baseSyn = Number(Math.min(0.999, Math.max(0.0, baseSyn + (Math.random()*0.05 - 0.025))).toFixed(3));
+    basePps = Math.max(1, Math.round(basePps + (Math.random() * 50 - 25)));
+    baseUnique = Math.max(1, Math.round(baseUnique + Math.random() * 6 - 3));
+    baseSyn = Number(
+      Math.min(0.999, Math.max(0.0, baseSyn + (Math.random() * 0.05 - 0.025))).toFixed(3)
+    );
 
-    return {pps: basePps, unique: baseUnique, syn: baseSyn, wave: wr.mode};
+    return { pps: basePps, unique: baseUnique, syn: baseSyn, wave: wr.mode };
   };
 
   // perform one simulation step: generate triple, send to backend, update UI
@@ -164,7 +174,11 @@ export default function FirewallDemo() {
     const sentHistory = [...historySeq, triple].slice(-SEQ_LEN);
 
     // Build payload
-    const payload = { history: sentHistory, current: triple, ip: `192.168.${Math.floor(Math.random()*254)}.${Math.floor(Math.random()*254)}` };
+    const payload = {
+      history: sentHistory,
+      current: triple,
+      ip: `192.168.${Math.floor(Math.random() * 254)}.${Math.floor(Math.random() * 254)}`,
+    };
 
     // Optimistically update UI values (so chart & display respond instantly)
     setPps(sim.pps);
@@ -213,6 +227,8 @@ export default function FirewallDemo() {
       setHistory((h) => [entry, ...h].slice(0, 200));
       setHistorySeq(sentHistory);
       setLatestDecision({ ...entry });
+      // ensure chart still advances
+      setTsSeries((s) => [...s, { time: nowLabel(), suspicious: 0 }].slice(-80));
     }
   };
 
@@ -262,15 +278,30 @@ export default function FirewallDemo() {
   const LatestCard = ({ latest }) => {
     const info = latest ? actionLabel(latest.action) : null;
     return (
-      <div style={{
-        background: "#061018", padding: 14, borderRadius: 10, border: "1px solid rgba(255,255,255,0.03)"
-      }}>
+      <div
+        style={{
+          background: "#061018",
+          padding: 14,
+          borderRadius: 10,
+          border: "1px solid rgba(255,255,255,0.03)",
+        }}
+      >
         <div style={{ color: "#94a3b8", fontSize: 13 }}>Latest Decision</div>
         <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 10 }}>
-          <div style={{
-            width: 70, height: 70, borderRadius: 12, background: info ? info.color : "#374151", display: "flex",
-            alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800, fontSize: 16
-          }}>
+          <div
+            style={{
+              width: 70,
+              height: 70,
+              borderRadius: 12,
+              background: info ? info.color : "#374151",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#fff",
+              fontWeight: 800,
+              fontSize: 16,
+            }}
+          >
             {info ? info.text : "--"}
           </div>
           <div>
@@ -286,172 +317,177 @@ export default function FirewallDemo() {
     );
   };
 
+  // === LAYOUT: make full-width container (changes from previous maxWidth center) ===
   return (
-    <div style={{ minHeight: "100vh", background: "linear-gradient(180deg,#041018 0%, #071624 100%)", paddingBottom: 48 }}>
-      <div style={{ maxWidth: 1200, margin: "18px auto", padding: "18px 20px" }}>
-        {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div>
-            <h1 style={{ color: "#e6f0ff", margin: 0, fontSize: 28 }}>Autonomous AI Firewall — Live Demo</h1>
-            <div style={{ color: "#94a3b8", marginTop: 6 }}>Auto mode: Visible Attack Waves · LSTM (suspicious) + XGBoost (decision)</div>
-          </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <button
-              onClick={startSimulation}
-              disabled={running}
-              style={{
-                background: "#06b6d4", color: "#022023", border: "none", padding: "10px 14px",
-                borderRadius: 10, fontWeight: 800, cursor: running ? "not-allowed" : "pointer"
-              }}
-            >
-              Start Simulation
-            </button>
-            <button
-              onClick={stopSimulation}
-              disabled={!running}
-              style={{
-                background: "#374151", color: "#e6eef6", border: "none", padding: "10px 14px",
-                borderRadius: 10, fontWeight: 700, cursor: !running ? "not-allowed" : "pointer"
-              }}
-            >
-              Stop
-            </button>
-          </div>
+    <div style={{ width: "100vw", minHeight: "100vh", background: "linear-gradient(180deg,#041018 0%, #071624 100%)", padding: 24, boxSizing: "border-box" }}>
+      {/* Full-width header bar */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <h1 style={{ color: "#e6f0ff", margin: 0, fontSize: 32 }}>Autonomous AI Firewall — Live Demo</h1>
+          <div style={{ color: "#94a3b8", marginTop: 6 }}>Auto mode: Visible Attack Waves · LSTM (suspicious) + XGBoost (decision)</div>
         </div>
 
-        {/* Main grid */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 18 }}>
-          {/* Left: controls & live feed */}
-          <div>
-            {/* Live telemetry card */}
-            <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
-              <div style={{ flex: 1, background: "#07121a", padding: 14, borderRadius: 10 }}>
-                <div style={{ color: "#9ca3af", fontSize: 13 }}>Realtime Telemetry</div>
-                <div style={{ display: "flex", gap: 18, marginTop: 12 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ color: "#9ca3af", fontSize: 12 }}>Packets/sec</div>
-                    <div style={{ color: "#e6eef6", fontSize: 20, fontWeight: 800 }}>{pps}</div>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ color: "#9ca3af", fontSize: 12 }}>Unique IPs</div>
-                    <div style={{ color: "#e6eef6", fontSize: 20, fontWeight: 800 }}>{uniqueIps}</div>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ color: "#9ca3af", fontSize: 12 }}>SYN Ratio</div>
-                    <div style={{ color: "#e6eef6", fontSize: 20, fontWeight: 800 }}>{synRatio.toFixed(3)}</div>
-                  </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: 12 }}>
+          <button
+            onClick={startSimulation}
+            disabled={running}
+            style={{
+              background: "#06b6d4",
+              color: "#022023",
+              border: "none",
+              padding: "10px 14px",
+              borderRadius: 10,
+              fontWeight: 800,
+              cursor: running ? "not-allowed" : "pointer",
+            }}
+          >
+            Start Simulation
+          </button>
+          <button
+            onClick={stopSimulation}
+            disabled={!running}
+            style={{
+              background: "#374151",
+              color: "#e6eef6",
+              border: "none",
+              padding: "10px 14px",
+              borderRadius: 10,
+              fontWeight: 700,
+              cursor: !running ? "not-allowed" : "pointer",
+            }}
+          >
+            Stop
+          </button>
+        </div>
+      </div>
+
+      {/* Main grid stretches full width */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", gap: 20, alignItems: "start" }}>
+        {/* Left: wide column */}
+        <div>
+          {/* Live telemetry card */}
+          <div style={{ display: "flex", gap: 14, marginBottom: 14 }}>
+            <div style={{ flex: 1, background: "#07121a", padding: 18, borderRadius: 12 }}>
+              <div style={{ color: "#9ca3af", fontSize: 13 }}>Realtime Telemetry</div>
+              <div style={{ display: "flex", gap: 24, marginTop: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#9ca3af", fontSize: 12 }}>Packets/sec</div>
+                  <div style={{ color: "#e6eef6", fontSize: 28, fontWeight: 800 }}>{pps}</div>
                 </div>
-              </div>
-
-              <div style={{ width: 220 }}>
-                <LatestCard latest={latestDecision} />
-              </div>
-            </div>
-
-            {/* Suspicious trend chart */}
-            <div style={{ background: "#07121a", padding: 12, borderRadius: 10, marginBottom: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ color: "#9ca3af", fontSize: 13 }}>Suspicious Score (recent)</div>
-                <div style={{ color: "#9ca3af", fontSize: 12 }}>{tsSeries.length} samples</div>
-              </div>
-              <div style={{ height: 180 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={tsSeries}>
-                    <XAxis dataKey="time" hide />
-                    <YAxis domain={[0, 1]} tickFormatter={(v) => v.toFixed(2)} stroke="#9ca3af" />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="suspicious" stroke="#06b6d4" strokeWidth={2} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Live decision feed */}
-            <div style={{ background: "#07121a", padding: 12, borderRadius: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ color: "#9ca3af", fontSize: 13 }}>Live Decisions Feed</div>
-                <div style={{ color: "#9ca3af", fontSize: 12 }}>{history.length} total</div>
-              </div>
-
-              <div style={{ marginTop: 10, maxHeight: 360, overflowY: "auto", paddingRight: 6 }}>
-                {history.length === 0 && <div style={{ color: "#94a3b8" }}>Simulation stopped — start to see activity.</div>}
-                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                  {history.map((h, i) => (
-                    <li key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", background: "#0b1520", padding: 10, borderRadius: 8, marginBottom: 8 }}>
-                      <div>
-                        <div style={{ color: "#e6eef6", fontWeight: 700 }}>{h.ip} <span style={{ color: "#9ca3af", fontSize: 12, marginLeft: 8 }}>{h.ts}</span></div>
-                        <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 6 }}>pps: {h.current[0]}, ips: {h.current[1]}, syn: {h.current[2].toFixed(3)}</div>
-                        <div style={{ color: "#9ca3af", fontSize: 12, marginTop: 6 }}>wave: {h.wave}</div>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                        <div style={{ padding: "6px 10px", borderRadius: 6, background: actionLabel(h.action).color, color: "#fff", fontWeight: 800 }}>{actionLabel(h.action).text}</div>
-                        <div style={{ color: "#94a3b8", fontSize: 12 }}>susp: {h.suspicious != null ? Number(h.suspicious).toFixed(3) : "—"}</div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          </div>
-
-          {/* Right: summary + chart */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ background: "#07121a", padding: 12, borderRadius: 10 }}>
-              <div style={{ color: "#9ca3af", fontSize: 13 }}>Overview</div>
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div style={{ background: "#08121a", padding: 10, borderRadius: 8 }}>
-                  <div style={{ color: "#9ca3af", fontSize: 12 }}>Total Decisions</div>
-                  <div style={{ color: "#e6eef6", fontSize: 20, fontWeight: 800, marginTop: 6 }}>{history.length}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#9ca3af", fontSize: 12 }}>Unique IPs</div>
+                  <div style={{ color: "#e6eef6", fontSize: 28, fontWeight: 800 }}>{uniqueIps}</div>
                 </div>
-                <div style={{ background: "#08121a", padding: 10, borderRadius: 8 }}>
-                  <div style={{ color: "#9ca3af", fontSize: 12 }}>Current Wave</div>
-                  <div style={{ color: "#e6eef6", fontSize: 18, fontWeight: 700, marginTop: 6 }}>{(latestDecision && latestDecision.wave) || "—"}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#9ca3af", fontSize: 12 }}>SYN Ratio</div>
+                  <div style={{ color: "#e6eef6", fontSize: 28, fontWeight: 800 }}>{synRatio.toFixed(3)}</div>
                 </div>
               </div>
             </div>
 
-            <div style={{ background: "#07121a", padding: 12, borderRadius: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                <div style={{ color: "#9ca3af", fontSize: 13 }}>Decision Counts</div>
-                <div style={{ color: "#9ca3af", fontSize: 12 }}>Last {history.length}</div>
-              </div>
+            <div style={{ width: 260 }}>
+              <LatestCard latest={latestDecision} />
+            </div>
+          </div>
 
-              <div style={{ width: "100%", height: 220 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={barData}>
-                    <XAxis dataKey="name" stroke="#9ca3af" />
-                    <YAxis stroke="#9ca3af" allowDecimals={false} />
-                    <Tooltip />
-                    <Bar dataKey="count">
-                      {barData.map((entry, idx) => (
-                        <Cell key={`cell-${idx}`} fill={entry.color} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+          {/* Suspicious trend chart */}
+          <div style={{ background: "#07121a", padding: 14, borderRadius: 12, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ color: "#9ca3af", fontSize: 13 }}>Suspicious Score (recent)</div>
+              <div style={{ color: "#9ca3af", fontSize: 12 }}>{tsSeries.length} samples</div>
+            </div>
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={tsSeries}>
+                  <XAxis dataKey="time" hide />
+                  <YAxis domain={[0, 1]} tickFormatter={(v) => v.toFixed(2)} stroke="#9ca3af" />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="suspicious" stroke="#06b6d4" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Live decision feed */}
+          <div style={{ background: "#07121a", padding: 14, borderRadius: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ color: "#9ca3af", fontSize: 13 }}>Live Decisions Feed</div>
+              <div style={{ color: "#9ca3af", fontSize: 12 }}>{history.length} total</div>
             </div>
 
-            <div style={{ background: "#07121a", padding: 12, borderRadius: 10 }}>
-              <div style={{ color: "#9ca3af", fontSize: 12 }}>Backend</div>
-              <div style={{ marginTop: 6, color: "#e6eef6", fontWeight: 700 }}>POST {API_BASE}/predict_seq</div>
-              <div style={{ marginTop: 8, color: "#9ca3af", fontSize: 12 }}>Run backend:</div>
-              <code style={{ display: "block", marginTop: 6, color: "#d1fae5" }}>uvicorn server_ml:app --reload</code>
+            <div style={{ marginTop: 10, maxHeight: "50vh", overflowY: "auto", paddingRight: 6 }}>
+              {history.length === 0 && <div style={{ color: "#94a3b8" }}>Simulation stopped — start to see activity.</div>}
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {history.map((h, i) => (
+                  <li key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", background: "#0b1520", padding: 12, borderRadius: 10, marginBottom: 10 }}>
+                    <div>
+                      <div style={{ color: "#e6eef6", fontWeight: 800 }}>{h.ip} <span style={{ color: "#9ca3af", fontSize: 12, marginLeft: 8 }}>{h.ts}</span></div>
+                      <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 8 }}>pps: {h.current[0]}, ips: {h.current[1]}, syn: {h.current[2].toFixed(3)}</div>
+                      <div style={{ color: "#9ca3af", fontSize: 12, marginTop: 6 }}>wave: {h.wave}</div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+                      <div style={{ padding: "8px 12px", borderRadius: 8, background: actionLabel(h.action).color, color: "#fff", fontWeight: 900 }}>{actionLabel(h.action).text}</div>
+                      <div style={{ color: "#94a3b8", fontSize: 12 }}>susp: {h.suspicious != null ? Number(h.suspicious).toFixed(3) : "—"}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           </div>
         </div>
 
-        {/* Footer / errors */}
-        <div style={{ maxWidth: 1200, margin: "20px auto 0", padding: "0 20px" }}>
-          {errorMsg && (
-            <div style={{ background: "#fee2e2", color: "#991b1b", padding: 10, borderRadius: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>Error: {errorMsg}</div>
-                <button onClick={() => setErrorMsg(null)} style={{ textDecoration: "underline", background: "transparent", border: "none" }}>Dismiss</button>
+        {/* Right: summary + chart (fixed column) */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ background: "#07121a", padding: 14, borderRadius: 12 }}>
+            <div style={{ color: "#9ca3af", fontSize: 13 }}>Overview</div>
+            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div style={{ background: "#08121a", padding: 12, borderRadius: 8 }}>
+                <div style={{ color: "#9ca3af", fontSize: 12 }}>Total Decisions</div>
+                <div style={{ color: "#e6eef6", fontSize: 20, fontWeight: 800, marginTop: 8 }}>{history.length}</div>
+              </div>
+              <div style={{ background: "#08121a", padding: 12, borderRadius: 8 }}>
+                <div style={{ color: "#9ca3af", fontSize: 12 }}>Current Wave</div>
+                <div style={{ color: "#e6eef6", fontSize: 18, fontWeight: 700, marginTop: 8 }}>{(latestDecision && latestDecision.wave) || "—"}</div>
               </div>
             </div>
-          )}
+          </div>
+
+          <div style={{ background: "#07121a", padding: 14, borderRadius: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ color: "#9ca3af", fontSize: 13 }}>Decision Counts</div>
+              <div style={{ color: "#9ca3af", fontSize: 12 }}>Last {history.length}</div>
+            </div>
+
+            <div style={{ width: "100%", height: 240 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={barData}>
+                  <XAxis dataKey="name" stroke="#9ca3af" />
+                  <YAxis stroke="#9ca3af" allowDecimals={false} />
+                  <Tooltip />
+                  <Bar dataKey="count">
+                    {barData.map((entry, idx) => (
+                      <Cell key={`cell-${idx}`} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          
         </div>
+      </div>
+
+      {/* Footer / errors (full width) */}
+      <div style={{ marginTop: 20 }}>
+        {errorMsg && (
+          <div style={{ background: "#fee2e2", color: "#991b1b", padding: 10, borderRadius: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>Error: {errorMsg}</div>
+              <button onClick={() => setErrorMsg(null)} style={{ textDecoration: "underline", background: "transparent", border: "none" }}>Dismiss</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
