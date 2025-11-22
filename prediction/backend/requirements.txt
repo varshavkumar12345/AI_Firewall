@@ -6,3 +6,4 @@ torch
 xgboost
 python-dotenv
 gunicorn
+scikit-learn
