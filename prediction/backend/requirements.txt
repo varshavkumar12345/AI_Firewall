@@ -5,3 +5,4 @@ joblib
 torch
 xgboost
 python-dotenv
+gunicorn
