@@ -68,4 +68,8 @@ Phoenix is a project focused on DDoS detection, continuous learning, and human r
 - Use the HTIL frontend for human review and continuous learning.
 - Deploy prediction backend and frontend for real-time DDoS detection.
 
+## Dashboard
+
+https://phoenix-dashboard-9cxm.onrender.com/
+
 
