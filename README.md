@@ -58,8 +58,6 @@ Phoenix is a project focused on DDoS detection, continuous learning, and human r
    ```
 3. Start the development server:
    ```powershell
-   npm start
-   # or for Vite projects
    npm run dev
    ```
 
