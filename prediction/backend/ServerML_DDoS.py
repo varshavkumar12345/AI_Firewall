@@ -1,353 +1,276 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import os
+import time
+import threading
+from collections import defaultdict
+
 import numpy as np
 import joblib
-import torch
-import torch.nn as nn
-import os
-import xgboost as xgb
-import json
-from datetime import datetime
-from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-load_dotenv()
+try:
+    from scapy.all import sniff
+    SCAPY_AVAILABLE = True
+except:
+    SCAPY_AVAILABLE = False
 
-# ---- CONFIG ----
-SCALER_PATH= os.getenv("SCALER_PATH")
-LSTM_PATH= os.getenv("LSTM_PATH")
-XGB_PATH= os.getenv("XGB_PATH")
-INTERMEDIATE_PATH= os.getenv("INTERMEDIATE_JSON_PATH")
-DEVICE= torch.device("cpu")
+# ---------------- PATHS ----------------
 
-# Confidence threshold for human review (if prediction confidence is below this, flag for review)
-CONFIDENCE_THRESHOLD = 0.65
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-# ---- FLASK APP ----
-app = Flask(__name__)
-CORS(app)
+print(f"[INFO] Model directory: {MODEL_DIR}")
 
-# ---- LSTM model class ----
-class SuspiciousLSTM(nn.Module):
-    def __init__(self, input_dim=3, hidden=32, num_layers=1):
-        super().__init__()
-        self.lstm = nn.LSTM(input_dim, hidden, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden, 1)
-        self.act = nn.Sigmoid()
-    
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        last = out[:, -1, :]
-        return self.act(self.fc(last)).squeeze(1)
-
-# ---- Load artifacts ----
+# Load models with error handling
+model = None
 scaler = None
-lstm = None
-xgb_clf = None
 
-def try_load():
-    global scaler, lstm, xgb_clf
+try:
+    model_path = os.path.join(MODEL_DIR, "xgb.joblib")
+    scaler_path = os.path.join(MODEL_DIR, "scaler.joblib")
     
-    # Load scaler
-    if os.path.exists(SCALER_PATH):
-        try:
-            scaler = joblib.load(SCALER_PATH)
-            print(f"✓ Loaded scaler from {SCALER_PATH}")
-        except Exception as e:
-            print(f"✗ Failed to load scaler: {e}")
-            scaler = None
+    if os.path.exists(model_path):
+        model = joblib.load(model_path)
+        print(f"[OK] Loaded model from {model_path}")
     else:
-        print(f"✗ Scaler not found at {SCALER_PATH}")
-        scaler = None
-
-    # Load LSTM
-    if os.path.exists(LSTM_PATH):
-        try:
-            lstm = SuspiciousLSTM(input_dim=3, hidden=32, num_layers=1)
-            lstm.load_state_dict(torch.load(LSTM_PATH, map_location=DEVICE))
-            lstm.to(DEVICE)
-            lstm.eval()
-            print(f"✓ Loaded LSTM from {LSTM_PATH}")
-        except Exception as e:
-            print(f"✗ Failed to load LSTM: {e}")
-            lstm = None
-    else:
-        print(f"✗ LSTM not found at {LSTM_PATH}")
-        lstm = None
-
-    # Load XGBoost
-    if os.path.exists(XGB_PATH):
-        try:
-            xgb_clf = joblib.load(XGB_PATH)
-            print(f"✓ Loaded XGBoost from {XGB_PATH}")
-        except Exception as e:
-            print(f"✗ Failed to load XGBoost: {e}")
-            xgb_clf = None
-    else:
-        print(f"✗ XGBoost not found at {XGB_PATH}")
-        xgb_clf = None
-
-try_load()
-
-# ---- Utility functions ----
-def compute_suspicious_score(history_np: np.ndarray) -> float:
-    """Compute suspicious score using LSTM or fallback heuristic"""
-    if lstm is None:
-        pps = history_np[-1, 0]
-        syn = history_np[-1, 2]
-        s = min(1.0, (pps/2000)*0.6 + syn*0.6)
-        return float(np.clip(s, 0, 1))
+        print(f"[WARN] Model not found at {model_path}")
     
-    arr = history_np.astype("float32")[None, ...]
-    with torch.no_grad():
-        t = torch.from_numpy(arr).to(DEVICE)
-        out = lstm(t).cpu().numpy()
-        return float(out[0])
+    if os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)
+        print(f"[OK] Loaded scaler from {scaler_path}")
+    else:
+        print(f"[WARN] Scaler not found at {scaler_path}")
+except Exception as e:
+    print(f"[ERROR] Failed to load models: {e}")
 
-def xgb_decision(feature_vec: np.ndarray) -> tuple:
-    """
-    Make decision using XGBoost
-    Returns: (action: int, confidence: float)
-    """
-    if xgb_clf is None:
-        # Fallback rule-based decision
-        pps, uniq, syn, susp = feature_vec
-        if pps > 1500 or susp > 0.8 or syn > 0.7:
-            return 2, 0.85
-        if pps > 800 or susp > 0.5:
-            return 1, 0.70
-        return 0, 0.90
+# ---------------- FLASK ----------------
+
+app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
+
+# ---------------- STATS ----------------
+
+packet_sizes = []
+packet_count = 0
+byte_count = 0
+lock = threading.Lock()
+
+WINDOW_SEC = 1.0
+latest_prediction = {"status": "initializing"}
+
+# ---------------- PACKET CAPTURE ----------------
+
+def packet_handler(packet):
+    global packet_count, byte_count
+
+    size = len(packet)
+
+    with lock:
+        packet_sizes.append(size)
+        packet_count += 1
+        byte_count += size
+
+def start_packet_capture():
+    """Start packet capture in background (optional)"""
+    if not SCAPY_AVAILABLE:
+        print("[WARN] Scapy not available, skipping packet capture")
+        return
     
-    X = feature_vec.reshape(1, -1)
     try:
-        probs = xgb_clf.predict_proba(X)[0]
-        if len(probs) < 3:
-            action = int(xgb_clf.predict(X)[0])
-            return action, 0.70
+        print("[INFO] Starting packet capture...")
+        sniff(prn=packet_handler, store=False)
+    except Exception as e:
+        print(f"[WARN] Packet capture failed (may need admin): {e}")
+
+# ---------------- FEATURE EXTRACTION ----------------
+
+def extract_features():
+    global packet_sizes, packet_count, byte_count
+
+    with lock:
+        sizes = packet_sizes.copy()
+        count = packet_count
+        bytes_ = byte_count
+
+        packet_sizes = []
+        packet_count = 0
+        byte_count = 0
+
+    if count == 0:
+        return None
+
+    pkt_len_mean = np.mean(sizes) if sizes else 64.0
+    pkt_len_std = np.std(sizes) if sizes else 10.0
+    pkt_rate = count / WINDOW_SEC
+    byte_rate = bytes_ / WINDOW_SEC
+
+    features = np.array([[
+        pkt_len_mean,
+        pkt_len_std,
+        pkt_rate,
+        byte_rate
+    ]])
+
+    if scaler is None:
+        return features
+    return scaler.transform(features)
+
+# ---------------- PREDICTION LOOP ----------------
+
+def prediction_loop():
+    global latest_prediction
+
+    while True:
+        time.sleep(WINDOW_SEC)
+
+        features = extract_features()
+        if features is None:
+            continue
+
+        pred = model.predict(features)[0]
+
+        latest_prediction = {
+            "ddos_detected": bool(pred),
+            "timestamp": time.time(),
+            "features": {
+                "pkt_len_mean": float(features[0][0]),
+                "pkt_len_std": float(features[0][1]),
+                "pkt_rate": float(features[0][2]),
+                "byte_rate": float(features[0][3])
+            }
+        }
+
+# ---------------- API ----------------
+
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "message": "AI Firewall Backend",
+        "endpoints": ["/health", "/predict", "/predict_seq"]
+    })
+
+@app.route("/predict", methods=["GET"])
+def predict():
+    return jsonify(latest_prediction)
+
+@app.route("/predict_seq", methods=["POST"])
+def predict_seq():
+    try:
+        data = request.json
+        history = data.get("history", [])
+        current = data.get("current", [])
+        ip = data.get("ip", "unknown")
         
-        prob_allow, prob_rate, prob_block = probs[0], probs[1], probs[2]
+        if len(current) >= 3:
+            pps = float(current[0])
+            unique_ips = float(current[1])
+            syn_ratio = float(current[2])
+            
+            # Build features for XGBoost model
+            # Model expects: [pkt_len_mean, pkt_len_std, pkt_rate, byte_rate]
+            pkt_len_mean = 60.0 + (syn_ratio * 20)  # Adjust based on SYN ratio
+            pkt_len_std = 8.0
+            pkt_rate = pps
+            byte_rate = pps * (pkt_len_mean + 20)  # More realistic byte calculation
+            
+            features = np.array([[pkt_len_mean, pkt_len_std, pkt_rate, byte_rate]])
+            
+            pred = 0
+            suspicious = 0.0
+            
+            if model and scaler:
+                try:
+                    features_scaled = scaler.transform(features)
+                    pred = int(model.predict(features_scaled)[0])
+                    suspicious = float(model.predict_proba(features_scaled)[0][1]) if hasattr(model, 'predict_proba') else float(pred)
+                except Exception as e:
+                    print(f"[WARN] Prediction error: {e}")
+                    # Fallback: use heuristic based on SYN ratio
+                    suspicious = min(0.99, syn_ratio * 2)
+                    pred = 1 if syn_ratio > 0.15 else 0
+            else:
+                # Fallback heuristic if model not loaded
+                suspicious = min(0.99, syn_ratio * 2 + (pps / 1000))
+                pred = 1 if (syn_ratio > 0.15 or pps > 500) else 0
+        else:
+            pred = 0
+            suspicious = 0.0
         
-        # Determine action with tuned thresholds
-        if prob_block >= 0.45 or prob_block > max(prob_allow, prob_rate) * 1.2:
-            action = 2
-        elif prob_rate >= 0.40 or prob_rate > max(prob_allow, prob_block) * 1.1:
-            action = 1
+        # Map prediction to action: 0=ALLOW, 1=RATE-LIMIT, 2=BLOCK
+        if pred > 0:
+            action = 2 if suspicious > 0.5 else 1
         else:
             action = 0
         
-        # Confidence is the probability of the chosen action
-        confidence = float(probs[action])
-        
-        return action, confidence
-    
-    except Exception as e:
-        print(f"XGBoost prediction error: {e}")
-        action = int(xgb_clf.predict(X)[0])
-        return action, 0.70
-
-def log_to_intermediate(history, current, ip, action, suspicious, confidence):
-    """Log prediction to intermediate file for potential human review"""
-    try:
-        # Flag for human review if confidence is low
-        needs_review = confidence < CONFIDENCE_THRESHOLD
-        
-        entry = {
-            "history": history,
-            "current": current,
-            "ip": ip,
-            "predicted_action": int(action),
-            "predicted_suspicious": float(suspicious),
-            "confidence": float(confidence),
-            "needs_review": needs_review,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        # Load existing data
-        if os.path.exists(INTERMEDIATE_PATH):
-            with open(INTERMEDIATE_PATH, 'r') as f:
-                data = json.load(f)
-            if not isinstance(data, list):
-                data = []
-        else:
-            data = []
-        
-        # Append new entry
-        data.append(entry)
-        
-        # Keep only last 1000 entries to prevent file from growing too large
-        if len(data) > 1000:
-            data = data[-1000:]
-        
-        # Save back
-        with open(INTERMEDIATE_PATH, 'w') as f:
-            json.dump(data, f, indent=2)
-        
-        if needs_review:
-            print(f"⚠ Low confidence prediction logged for review: IP={ip}, Action={action}, Confidence={confidence:.2f}")
-    
-    except Exception as e:
-        print(f"Error logging to intermediate file: {e}")
-
-# ---- Endpoints ----
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({
-        "status": "ok",
-        "models": {
-            "scaler": os.path.exists(SCALER_PATH),
-            "lstm": os.path.exists(LSTM_PATH),
-            "xgb": os.path.exists(XGB_PATH)
-        },
-        "human_review_enabled": True,
-        "confidence_threshold": CONFIDENCE_THRESHOLD
-    })
-
-@app.route('/debug_info', methods=['GET'])
-def debug_info():
-    return jsonify({
-        "scaler_exists": os.path.exists(SCALER_PATH),
-        "lstm_exists": os.path.exists(LSTM_PATH),
-        "xgb_exists": os.path.exists(XGB_PATH),
-        "scaler_n_features": getattr(scaler, "n_features_in_", None),
-        "intermediate_path": INTERMEDIATE_PATH,
-        "confidence_threshold": CONFIDENCE_THRESHOLD
-    })
-
-@app.route('/predict_seq', methods=['POST'])
-def predict_seq():
-    try:
-        body = request.get_json()
-        
-        if not body:
-            return jsonify({"error": "No JSON data provided"}), 400
-        
-        history = body.get('history')
-        current = body.get('current')
-        ip = body.get('ip')
-        
-        # Validate inputs
-        if not current or len(current) != 3:
-            return jsonify({
-                "error": "current must be length 3: [pps, unique_ips, syn_ratio]"
-            }), 400
-        
-        if not history or len(history) < 2:
-            return jsonify({
-                "error": "history must be at least length 2"
-            }), 400
-        
-        # Convert to numpy arrays
-        hist = np.array(history, dtype=np.float32)
-        cur = np.array(current, dtype=np.float32).reshape(1, -1)
-        
-        # Compute suspicious score
-        hist_raw = hist.astype(np.float32)
-        susp_score = compute_suspicious_score(hist_raw)
-        
-        # Build feature vector [pps, unique_ips, syn_ratio, suspicious]
-        cur_raw = cur.flatten().astype(np.float32)
-        feat_raw = np.concatenate([cur_raw, np.array([susp_score], dtype=np.float32)])
-        
-        # Scale features if scaler exists
-        if scaler is not None:
-            n_in = getattr(scaler, "n_features_in_", None)
-            try:
-                if n_in is None or n_in == feat_raw.shape[0]:
-                    feat_scaled = scaler.transform(feat_raw.reshape(1, -1))[0]
-                elif n_in == cur_raw.shape[0]:
-                    cur_scaled = scaler.transform(cur_raw.reshape(1, -1))[0]
-                    feat_scaled = np.concatenate([cur_scaled, np.array([susp_score], dtype=np.float32)])
-                else:
-                    feat_scaled = feat_raw
-            except Exception as e:
-                print(f"Scaler transform failed: {e}")
-                feat_scaled = feat_raw
-        else:
-            feat_scaled = feat_raw
-        
-        feat = feat_scaled.astype(np.float32)
-        
-        # Make decision
-        action, confidence = xgb_decision(feat)
-        
-        # Log to intermediate file for potential human review
-        log_to_intermediate(
-            history,
-            current,
-            ip or "unknown",
-            action,
-            susp_score,
-            confidence
-        )
-        
         return jsonify({
-            "action": int(action),
-            "suspicious": float(susp_score),
-            "confidence": float(confidence),
+            "action": action,
+            "suspicious": float(suspicious),
             "ip": ip,
-            "needs_review": confidence < CONFIDENCE_THRESHOLD
+            "timestamp": time.time()
+        })
+    except Exception as e:
+        print(f"[ERROR] /predict_seq error: {e}")
+        return jsonify({"error": str(e), "action": 0, "suspicious": 0.0}), 400
+
+@app.route("/traffic", methods=["GET"])
+def get_traffic():
+    """Get current traffic statistics"""
+    global packet_sizes, packet_count, byte_count
+    
+    with lock:
+        sizes = packet_sizes.copy()
+        count = packet_count
+        bytes_ = byte_count
+    
+    if count == 0:    ### CAUSE FOR DATA ON FRONTEND TO BE 0 -- needs windows admin access to get packet count
+        return jsonify({
+            "pps": 0,
+            "byte_rate": 0,
+            "unique_ips": 0, 
+            "syn_ratio": 0.0,
+            "packet_count": 0
         })
     
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "type": type(e).__name__
-        }), 500
-
-@app.route('/reload_models', methods=['POST'])
-def reload_models():
-    """Reload models without restarting server"""
-    try:
-        try_load()
-        return jsonify({"reloaded": True, "timestamp": datetime.utcnow().isoformat()})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/intermediate_stats', methods=['GET'])
-def intermediate_stats():
-    """Get statistics about intermediate predictions"""
-    try:
-        if not os.path.exists(INTERMEDIATE_PATH):
-            return jsonify({
-                "total_predictions": 0,
-                "needs_review": 0,
-                "review_percentage": 0.0
-            })
-        
-        with open(INTERMEDIATE_PATH, 'r') as f:
-            data = json.load(f)
-        
-        if not isinstance(data, list):
-            data = []
-        
-        total = len(data)
-        needs_review = sum(1 for item in data if item.get('needs_review', False))
-        review_pct = (needs_review / total * 100) if total > 0 else 0.0
-        
-        return jsonify({
-            "total_predictions": total,
-            "needs_review": needs_review,
-            "review_percentage": round(review_pct, 2)
-        })
+    pkt_len_mean = np.mean(sizes) if sizes else 64
+    pkt_len_std = np.std(sizes) if sizes else 10
+    pkt_rate = count / WINDOW_SEC
+    byte_rate = bytes_ / WINDOW_SEC
     
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    # Estimate SYN ratio from packet patterns (simplified: use packet size variance)
+    syn_ratio = min(0.99, pkt_len_std / 100.0) if pkt_len_std > 0 else 0.05
+    
+    return jsonify({
+        "pps": int(pkt_rate),
+        "byte_rate": int(byte_rate),
+        "unique_ips": int(count / 10) if count > 0 else 0,
+        "syn_ratio": round(float(syn_ratio), 3),
+        "packet_count": count,
+        "packet_len_mean": round(float(pkt_len_mean), 2),
+        "packet_len_std": round(float(pkt_len_std), 2)
+    })
 
-# Startup message
+# ---------------- MAIN ----------------
+
 if __name__ == "__main__":
-    print("\n" + "=" * 80)
-    print("DDoS AUTONOMOUS FIREWALL ML SERVER (Flask)")
-    print("=" * 80)
-    print("LSTM + XGBoost Prediction Pipeline")
-    print("Human-in-the-Loop Continuous Learning Enabled")
-    print("=" * 80)
-    print(f"\nConfidence Threshold: {CONFIDENCE_THRESHOLD}")
-    print(f"Intermediate Log: {INTERMEDIATE_PATH}")
-    print("\nEndpoints:")
-    print("   POST /predict_seq          - Make DDoS prediction")
-    print("   POST /reload_models        - Reload trained models")
-    print("   GET  /health               - Health check")
-    print("   GET  /debug_info           - Debug information")
-    print("   GET  /intermediate_stats   - Review statistics")
-    print("=" * 80 + "\n")
+    print("\n" + "="*50)
+    print("AI Firewall Backend Starting")
+    print("="*50)
+    print(f"API running on http://0.0.0.0:8000")
+    print(f"Test with: http://localhost:8000/health")
+    print("="*50)
+    print("[INFO] Starting packet capture (requires admin privileges)...")
+    print("="*50 + "\n")
     
+    # Start real packet capture only
+    threading.Thread(
+        target=start_packet_capture,
+        daemon=True
+    ).start()
+
+    # Start prediction loop
+    threading.Thread(
+        target=prediction_loop,
+        daemon=True
+    ).start()
+
     app.run(host="0.0.0.0", port=8000, debug=False)
