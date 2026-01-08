@@ -49,6 +49,7 @@ Phoenix is a project focused on DDoS detection, continuous learning, and human r
    python HumanReview_DDoS.py
    python ServerML_DDoS.py
    ```
+   Double click on `run_admin.bat` to run `ServerML_DDoS.py`
 
 ### Frontend Setup
 1. Navigate to the frontend folder (e.g., `htil/frontend` or `prediction/frontend`).
